@@ -18,10 +18,87 @@
 
 var express    = require('express'),
   app          = express(),
-  watson       = require('watson-developer-cloud');
+  watson       = require('watson-developer-cloud'),
+  request   = require('request'),
+  path      = require('path'),
+  bluemix   = require('./config/bluemix'),
+  validator = require('validator'),
+  extend    = require('util')._extend,
+  fs        = require('fs'),
+  multer    = require('multer');
 
+//visuaal recognition
+
+var storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, './uploads/');
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + '-' + file.originalname);
+  }
+});
+
+var upload = multer({ storage: storage });  
+  
 // Bootstrap application settings
 require('./config/express')(app);
+
+// if bluemix credentials exists, then override local
+var credentials = extend({
+  version: 'v1',
+  username: '<username>',
+  password: '<password>'
+}, bluemix.getServiceCreds('visual_recognition')); // VCAP_SERVICES
+
+
+// Create the service wrapper
+var visualRecognition = watson.visual_recognition(credentials);
+
+
+app.post('/', upload.single('image'), function(req, res, next) {
+
+  // Classifiers are 0 = all or a json = {label_groups:['<classifier-name>']}
+  var classifier = req.body.classifier || '0';  // All
+  if (classifier !== '0') {
+    classifier = JSON.stringify({label_groups:[classifier]});
+  }
+
+  var imgFile;
+
+  if (req.file) {
+    // file image
+    imgFile = fs.createReadStream(req.file.path);
+  } else if(req.body.url && validator.isURL(req.body.url)) {
+    // web image
+    imgFile = request(req.body.url.split('?')[0]);
+  } else if (req.body.url && req.body.url.indexOf('images') === 0) {
+    // local image
+    imgFile = fs.createReadStream(path.join('public', req.body.url));
+  } else {
+    // malformed url
+    return next({ error: 'Malformed URL', code: 400 });
+  }
+
+  var formData = {
+    labels_to_check: classifier,
+    image_file: imgFile
+  };
+
+  visualRecognition.recognize(formData, function(err, result) {
+    // delete the recognized file
+    if(req.file)
+      fs.unlink(imgFile.path);
+
+    if (err)
+      next(err);
+    else
+      return res.json(result);
+  });
+});
+
+
+// TEXT TO SPEECH
+
 
 // For local development, replace username and password
 var textToSpeech = watson.text_to_speech({
@@ -34,7 +111,7 @@ app.get('/api/synthesize', function(req, res, next) {
   var transcript = textToSpeech.synthesize(req.query);
   transcript.on('response', function(response) {
     if (req.query.download) {
-      response.headers['content-disposition'] = 'attachment; filename=transcript.ogg';
+      response.headers['content-disposition'] = 'attachment; filename=transcript.flac';
     }
   });
   transcript.on('error', function(error) {
@@ -43,14 +120,6 @@ app.get('/api/synthesize', function(req, res, next) {
   transcript.pipe(res);
 });
 
-// app.get('/api/voices', function(req, res, next) {
-//   textToSpeech.voices(function (error, voices) {
-//     if (error)
-//       next(error);
-//     else
-//       res.json(voices);
-//   });
-// });
 
 // error-handler settings
 require('./config/error-handler')(app);
